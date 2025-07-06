@@ -52,8 +52,8 @@ Make sure your AWS credentials have the following permissions:
 
 ## API Endpoints
 
-- `GET /api/s3-data?date=YYYY-MM-DD` - Fetches JSON data from S3 for a specific date
-  - `date` parameter is optional, defaults to today's date
+- `GET /api/s3-data?utc_date=YYYY-MM-DD` - Fetches JSON data from S3 for a specific date
+  - `utc_date` parameter is optional, defaults to today's date
   - Date format must be YYYY-MM-DD (e.g., 2025-01-15)
 
 ## Components

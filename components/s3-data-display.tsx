@@ -48,7 +48,7 @@ export default function S3DataDisplay() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`/api/s3-data?date=${date}`);
+      const response = await fetch(`/api/s3-data?utc_date=${date}`);
       
       if (!response.ok) {
         const errorData = await response.json();
@@ -61,7 +61,7 @@ export default function S3DataDisplay() {
             const previousDate = currentDate.toISOString().split('T')[0];
             
             // Try previous day
-            const prevResponse = await fetch(`/api/s3-data?date=${previousDate}`);
+            const prevResponse = await fetch(`/api/s3-data?utc_date=${previousDate}`);
             if (prevResponse.ok) {
               const prevData = await prevResponse.json();
               setData(prevData);

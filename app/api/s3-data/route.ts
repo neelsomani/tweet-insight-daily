@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
   try {
     // Get date from query parameters, default to today
     const { searchParams } = new URL(request.url);
-    const dateParam = searchParams.get('date');
+    const dateParam = searchParams.get('utc_date');
     
     // Use provided date or default to today's date in YYYY-MM-DD format
     const date = dateParam || new Date().toISOString().split('T')[0];
