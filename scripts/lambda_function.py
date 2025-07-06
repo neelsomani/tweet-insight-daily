@@ -145,7 +145,9 @@ def cache_to_s3(key_prefix, key_suffix=".json", data_extractor=None, cache_condi
                 logger.info("Saved %s to S3: %s", key_prefix, cache_key)
             except Exception as e:
                 logger.warning("Failed to save %s to S3: %s", key_prefix, e)
-            
+
+            if data_extractor:
+                return data_extractor(result)
             return result
         return wrapper
     return decorator
