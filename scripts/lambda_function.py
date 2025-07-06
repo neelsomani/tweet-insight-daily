@@ -455,7 +455,6 @@ def openai_news(entity, tweets):
         messages=[{"role": "user", "content": summary_prompt}],
         temperature=0,
     ).choices[0].message.content.strip()
-    import pdb; pdb.set_trace()
     logger.info("Summary for %s:\n%s", entity, summary)
     return summary
 
