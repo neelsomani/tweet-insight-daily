@@ -11,14 +11,16 @@ A Next.js application that displays daily tech Twitter insights and analytics.
 
 ## Setup
 
-1. Install dependencies:
+1. Deploy using the script in the `/scripts` directory. (Set your `.env` file according to the template.)
+
+2. Install dependencies for the Next server:
 ```bash
 npm install
 # or
 pnpm install
 ```
 
-2. Create a `.env.local` file in the root directory with the following variables:
+3. Create a `.env.local` file in the root directory with the following variables:
 ```env
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=your_access_key_here
@@ -26,7 +28,7 @@ AWS_SECRET_ACCESS_KEY=your_secret_key_here
 BUCKET_NAME=your_s3_bucket_name_here
 ```
 
-3. The S3 key format is automatically set to `{date}/summary.json` where `{date}` is in YYYY-MM-DD format.
+4. The S3 key format is automatically set to `{date}/summary.json` where `{date}` is in YYYY-MM-DD format.
    Make sure your S3 bucket has files organized like:
    ```
    your-bucket/
@@ -37,7 +39,7 @@ BUCKET_NAME=your_s3_bucket_name_here
    └── ...
    ```
 
-4. Run the development server:
+5. Run the development server:
 ```bash
 npm run dev
 # or
