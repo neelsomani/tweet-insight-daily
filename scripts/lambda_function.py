@@ -27,8 +27,9 @@ GUEST_ID = os.environ["GUEST_ID"]
 PERSONALIZATION_ID = os.environ["PERSONALIZATION_ID"]
 BEARER_TOKEN = os.environ["BEARER_TOKEN"]
 QUERY_ID = os.environ["QUERY_ID"]
-MAX_TWEETS = 200
-MAX_HEADLINES = 10
+MAX_TWEETS_LOOKBACK = 300  # Only look back this many tweets - backfills that require more tweets will fail
+MAX_TWEETS_FOR_ANALYSIS = 200  # After filtering, we limit to this many tweets for a given date
+MAX_HEADLINES = 10  # After filtering by date, we limit to this many headlines in our analysis
 
 RULES = """Rules:
 1. DO NOT include the poster or the media outlet as one of the three people, unless the news is about the poster/media outlet itself.
@@ -88,19 +89,25 @@ def cache_to_s3(key_prefix, key_suffix=".json", data_extractor=None, cache_condi
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+            # Get date from kwargs if provided, otherwise use current date rounded to midnight UTC
+            if 'target_date' in kwargs:
+                target_date = kwargs['target_date']
+            else:
+                # Round current time back to midnight UTC
+                now = datetime.datetime.utcnow()
+                target_date = now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d")
             
             # Generate cache key based on function arguments
             if args:
                 # Include all string arguments in the cache key
                 arg_parts = [str(arg)[:20] for arg in args]
                 if arg_parts:
-                    cache_key = f"{today}/{key_prefix}-{'-'.join(arg_parts)}{key_suffix}"
+                    cache_key = f"{target_date}/{key_prefix}-{'-'.join(arg_parts)}{key_suffix}"
                 else:
-                    cache_key = f"{today}/{key_prefix}{key_suffix}"
+                    cache_key = f"{target_date}/{key_prefix}{key_suffix}"
             else:
                 # For functions without arguments
-                cache_key = f"{today}/{key_prefix}{key_suffix}"
+                cache_key = f"{target_date}/{key_prefix}{key_suffix}"
             
             # Try to load from cache
             try:
@@ -111,7 +118,7 @@ def cache_to_s3(key_prefix, key_suffix=".json", data_extractor=None, cache_condi
                 
                 # Extract data if needed
                 if data_extractor:
-                    return data_extractor(cached_data)
+                    return data_extractor(cached_data, target_date=target_date)
                 return cached_data
                 
             except s3.exceptions.NoSuchKey:
@@ -147,7 +154,7 @@ def cache_to_s3(key_prefix, key_suffix=".json", data_extractor=None, cache_condi
                 logger.warning("Failed to save %s to S3: %s", key_prefix, e)
 
             if data_extractor:
-                return data_extractor(result)
+                return data_extractor(result, target_date=target_date)
             return result
         return wrapper
     return decorator
@@ -204,11 +211,51 @@ def build_twitter_payload(cursor=None):
     }
 
 
+def _parse_timestamp(timestamp_str):
+    """Parse Twitter timestamp format: 'Sun Jul 06 22:01:35 +0000 2025'"""
+    try:
+        # Parse the Twitter timestamp format
+        tweet_time = datetime.datetime.strptime(timestamp_str, "%a %b %d %H:%M:%S %z %Y")
+        # Convert to UTC datetime
+        return tweet_time.replace(tzinfo=datetime.timezone.utc)
+    except Exception as e:
+        logger.warning("Failed to parse tweet timestamp '%s': %s", timestamp_str, e)
+        return None
+
+
+def filter_tweets_by_date(tweets, target_date):
+    """Filter tweets to only include those within 24 hours before target date to target date"""
+    # Calculate date range: 24 hours before target date to target date
+    target_datetime = datetime.datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+    start_datetime = target_datetime - datetime.timedelta(days=1)  # 24 hours before
+    end_datetime = target_datetime
+    
+    logger.info("Filtering tweets between %s and %s", start_datetime, end_datetime)
+    
+    filtered_tweets = []
+    for tweet_data in tweets:
+        created_at = tweet_data.get("created_at")
+        if created_at:
+            tweet_time = _parse_timestamp(created_at)
+            if tweet_time and start_datetime <= tweet_time <= end_datetime:
+                filtered_tweets.append(tweet_data)
+    
+    logger.info("Filtered %d tweets from %d total tweets", len(filtered_tweets), len(tweets))
+
+    if not filtered_tweets:
+        raise RuntimeError("There were no tweets for that date. Try increasing MAX_TWEETS_FOR_ANALYSIS.")
+
+    return [
+        f"{tweet['name']} (@{tweet['screen_name']}): {tweet['full_text']}"
+        for tweet in filtered_tweets
+    ][:MAX_TWEETS_FOR_ANALYSIS]
+
+
 @retry_on_exception(max_retries=1)
-@cache_to_s3(key_prefix="tweets-final", 
-             data_extractor=lambda data: data["tweets"][:MAX_TWEETS],
-             cache_condition=lambda result: len(result.get("tweets", [])) > 0)
-def fetch_tweets():
+@cache_to_s3(key_prefix="tweets-raw", 
+             data_extractor=filter_tweets_by_date,
+             cache_condition=bool)
+def fetch_tweets(target_date):
     cookies = {
         'auth_token': AUTH_TOKEN,
         'ct0': CT0,
@@ -232,7 +279,7 @@ def fetch_tweets():
     cursor = None
     page = 1
 
-    while len(tweets) < MAX_TWEETS:
+    while len(tweets) < MAX_TWEETS_LOOKBACK:
         payload = build_twitter_payload(cursor)
         response = requests.post(url, headers=headers, cookies=cookies, json=payload)
 
@@ -240,6 +287,7 @@ def fetch_tweets():
             logger.error("Twitter API error: %s", response.text)
             break
 
+        logger.info("Fetched page #%s of tweets", page)
         data = response.json()
         instructions = data.get("data", {}).get("home", {}).get("home_timeline_urt", {}).get("instructions", [])
         found_cursor = False
@@ -250,13 +298,22 @@ def fetch_tweets():
                 entry_id = entry.get("entryId", "")
                 if entry_id.startswith("tweet-"):
                     result = entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
-                    full_text = result.get("legacy", {}).get("full_text")
+                    legacy = result.get("legacy", {})
+                    full_text = legacy.get("full_text")
+                    created_at = legacy.get("created_at")
                     user = result.get("core", {}).get("user_results", {}).get("result", {}).get("core", {})
                     screen_name = user.get("screen_name")
                     name = user.get("name")
-                    if full_text:
-                        tweets.append(f"{name} (@{screen_name}): {full_text}")
-                        logger.info("Fetched tweet: %s (@%s): %s", name, screen_name, full_text[:100].replace("\n", " "))
+                    
+                    if full_text and created_at:
+                        # Store full tweet data for filtering
+                        tweet_data = {
+                            "full_text": full_text,
+                            "created_at": created_at,
+                            "screen_name": screen_name,
+                            "name": name
+                        }
+                        tweets.append(tweet_data)
                 elif entry_id.startswith("cursor-bottom-"):
                     cursor = entry.get("content", {}).get("value")
                     found_cursor = True
@@ -269,14 +326,31 @@ def fetch_tweets():
 
     if not tweets:
         raise RuntimeError("There were no tweets fetched")
+    return tweets
 
-    return {"tweets": tweets}
+
+def filter_headlines_by_date(lst, target_date):
+    """Extract recent headlines from SerpApi response"""
+    headlines = []
+    target_datetime = datetime.datetime.strptime(target_date, "%Y-%m-%d")
+    for result in lst:
+        if "stories" in result:
+            headlines.extend(filter_headlines_by_date(result["stories"], target_date))
+        else:
+            try:
+                date_str = result["date"].split(",")[0]
+                news_date = datetime.datetime.strptime(date_str, "%m/%d/%Y")
+                if 0 <= (target_datetime - news_date).days <= 1:
+                    headlines.append(result["title"])
+            except KeyError:
+                continue
+    return headlines[:MAX_HEADLINES]
 
 
 @cache_to_s3(key_prefix="news", 
-             data_extractor=lambda data: extract_headlines_from_serp_response(data),
-             cache_condition=lambda result: len(result.get("news_results", [])) > 0)
-def get_recent_headlines(entity):
+             data_extractor=filter_headlines_by_date,
+             cache_condition=bool)
+def fetch_headlines(entity, target_date):
     # Fetch from SerpApi
     params = {
         "engine": "google_news",
@@ -293,24 +367,7 @@ def get_recent_headlines(entity):
         logger.error("Failed to fetch news for %s from SerpApi: %s", entity, e)
         return []
 
-    return serp_response
-
-
-def extract_headlines_from_serp_response(serp_response):
-    """Extract recent headlines from SerpApi response"""
-    headlines = []
-    now = datetime.datetime.utcnow()
-
-    for result in serp_response.get("news_results", []):
-        try:
-            date_str = result["date"].split(",")[0]
-            news_date = datetime.datetime.strptime(date_str, "%m/%d/%Y")
-            if (now - news_date).days <= 1:
-                headlines.append(result["title"])
-        except:
-            continue
-
-    return headlines[:MAX_HEADLINES]
+    return serp_response.get("news_results", [])
 
 
 def format_entities_prompt(tweets, feedback=None):
@@ -363,7 +420,8 @@ Headlines:
 
 Tweets:
 {tweets_blob}
-"""
+
+Random nonce: {random.random()}"""
 
 
 def format_summary_wo_headlines_prompt(entity, tweets):
@@ -372,11 +430,13 @@ def format_summary_wo_headlines_prompt(entity, tweets):
 Summarize the key announcement or controversy around {entity} as referenced in the tweets below.
 When you give your answer, DO NOT say anything like "based on the tweets". You should start the first sentence of your response with "{entity}".
 Do your best to infer what's going on based on the tweets below.
+DO NOT MISTAKE JOKES AS ACTUAL NEWS.
 Many of the tweets may be unrelated to {entity}. Please ONLY look at the tweets related to {entity}.
 
 Tweets:
 {tweets_blob}
-"""
+
+Random nonce: {random.random()}"""
 
 
 def format_entities_validation_prompt(entities_str, tweets):
@@ -385,7 +445,7 @@ def format_entities_validation_prompt(entities_str, tweets):
 
 {RULES}
 
-IMPORTANT: You MUST repsond with either VALID or feedback explaining which rule was violated in ONE sentence.
+IMPORTANT: You MUST respond with either VALID or feedback explaining which rule was violated in ONE sentence.
 IMPORTANT: IF VALID, YOU MUST NOT SAY ANYTHING ADDITIONAL OTHER THAN "VALID".
 IMPORTANT: DO NOT CHECK IF THE ENTITIES ARE REFERENCED IN THE TWEETS. AN ENTITY MAY NOT BE MENTIONED IN THE TWEETS AND THAT IS STILL VALID.
 
@@ -420,20 +480,19 @@ def openai_entities_prompt(tweets, feedback=None):
     return json.loads(result)
 
 
-def _filter_tweets(entity, tweets):
+def _pattern_match_tweets(entity, tweets):
     entity_matches = entity.split(" ")
-    return [t for t in tweets if any(v in t for v in entity_matches)]
+    return [t for t in tweets if any(v.lower() in t.lower() for v in entity_matches)]
 
 
 @retry_on_exception(max_retries=1)
-def openai_news(entity, tweets):
+def openai_news(entity, tweets, target_date):
     logger.info("Retrieving headlines about %s", entity)
-    headlines = get_recent_headlines(entity)
+    headlines = fetch_headlines(entity, target_date=target_date)
     if not headlines:
         logger.info("No recent headlines found for %s", entity)
-        return None
 
-    tweets = _filter_tweets(entity, tweets)
+    tweets = _pattern_match_tweets(entity, tweets)
     relevance_prompt = format_relevance_prompt(entity, headlines, tweets)
     logger.info("Running prompt to determine if headlines about %s relate to the tweets", entity)
     relevance = client.chat.completions.create(
@@ -462,8 +521,25 @@ def openai_news(entity, tweets):
 
 
 def lambda_handler(event, context):
-    tweets = fetch_tweets()
+    # Extract target date from event, default to current date rounded to midnight UTC
+    if 'utc_date' in event:
+        target_date = event['utc_date']
+    else:
+        # Round current time back to midnight UTC
+        now = datetime.datetime.utcnow()
+        target_date = now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d")
+
+    # Validate date format
+    try:
+        datetime.datetime.strptime(target_date, "%Y-%m-%d")
+    except ValueError:
+        logger.error("Invalid date format. Expected YYYY-MM-DD, got: %s", target_date)
+        return {"status": "error", "message": "Invalid date format. Expected YYYY-MM-DD"}
     
+    logger.info("Processing for date: %s (midnight UTC)", target_date)
+    
+    tweets = fetch_tweets(target_date=target_date)
+
     try:
         entities = openai_entities_prompt(tweets)
     except openai.BadRequestError:
@@ -473,15 +549,14 @@ def lambda_handler(event, context):
 
     latest_news = {}
     for entity in entities:
-        latest_news[entity] = openai_news(entity, tweets)
+        latest_news[entity] = openai_news(entity, tweets, target_date=target_date)
 
     payload = {
         "timestamp": time.time(),
         "latest_news": latest_news
     }
 
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    key = f'{today}/summary.json'
+    key = f'{target_date}/summary.json'
     logger.info("Uploading result to S3: s3://%s/%s", BUCKET, key)
     s3.put_object(
         Bucket=BUCKET,
@@ -494,4 +569,15 @@ def lambda_handler(event, context):
 
 
 if __name__ == "__main__":
-    lambda_handler({}, {})
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run lambda function with specified UTC date')
+    parser.add_argument('--utc_date', type=str, help='UTC date in YYYY-MM-DD format (default: current date)')
+    
+    args = parser.parse_args()
+
+    event = {}
+    if args.utc_date:
+        event = {"utc_date": args.utc_date}
+    
+    lambda_handler(event, {})
