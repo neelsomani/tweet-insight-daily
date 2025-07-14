@@ -371,7 +371,7 @@ def fetch_headlines(entity, target_date):
 
 
 def format_entities_prompt(tweets, feedback=None):
-    feedback_str = f"\n\nIMPORTANT, YOU PREVIOUSLY MADE THIS MISTAKE: {feedback}" if feedback is not None else ""
+    feedback_str = f"\n\nIMPORTANT, MAKE SURE YOU DO NOT INCLUDE THESE ENTITIES: {feedback}" if feedback is not None else ""
 
     if feedback_str:
         print(f"RECEIVED FEEDBACK: {feedback_str}")
@@ -448,6 +448,7 @@ def format_entities_validation_prompt(entities_str, tweets):
 IMPORTANT: You MUST respond with either VALID or feedback explaining which rule was violated in ONE sentence.
 IMPORTANT: IF VALID, YOU MUST NOT SAY ANYTHING ADDITIONAL OTHER THAN "VALID".
 IMPORTANT: DO NOT CHECK IF THE ENTITIES ARE REFERENCED IN THE TWEETS. AN ENTITY MAY NOT BE MENTIONED IN THE TWEETS AND THAT IS STILL VALID.
+IMPORTANT: Windsurf IS a valid entity. It is a company.
 
 List: {entities_str}
 
