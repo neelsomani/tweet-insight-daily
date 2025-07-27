@@ -449,6 +449,7 @@ IMPORTANT: You MUST respond with either VALID or feedback explaining which rule 
 IMPORTANT: IF VALID, YOU MUST NOT SAY ANYTHING ADDITIONAL OTHER THAN "VALID".
 IMPORTANT: DO NOT CHECK IF THE ENTITIES ARE REFERENCED IN THE TWEETS. AN ENTITY MAY NOT BE MENTIONED IN THE TWEETS AND THAT IS STILL VALID.
 IMPORTANT: Windsurf IS a valid entity. It is a company.
+IMPORTANT: Astronomer IS a valid entity. It is a company.
 
 List: {entities_str}
 
